@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "Bello Connector",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "Save references to Bello from your web browser",
+    "description": "Extension description"
+  }
+}
