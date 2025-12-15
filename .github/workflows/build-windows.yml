@@ -1,0 +1,194 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          Write-Host "Installing dependencies with chocolatey..."
+          choco install -y cmake make pkgconfiglite zip nsis
+          
+          Write-Host "Refreshing environment variables..."
+          Import-Module $env:ChocolateyInstall\helpers\chocolateyProfile.psm1
+          refreshenv
+          
+          Write-Host "Checking for NSIS installation..."
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
+          
+          if (-not $makensis) {
+            Write-Host "makensis not in PATH, searching chocolatey installation..."
+            
+            # Common chocolatey NSIS paths
+            $chocoNsisPaths = @(
+              "C:\ProgramData\chocolatey\bin\makensis.exe",
+              "C:\ProgramData\chocolatey\lib\nsis\tools\makensis.exe",
+              "C:\ProgramData\chocolatey\lib\nsis.install\tools\makensis.exe"
+            )
+            
+            foreach ($path in $chocoNsisPaths) {
+              Write-Host "Checking: $path"
+              if (Test-Path $path) {
+                Write-Host "✓ Found NSIS at: $path"
+                $nsisDir = Split-Path $path
+                $env:PATH = "$nsisDir;$env:PATH"
+                Write-Host "Added to PATH: $nsisDir"
+                break
+              }
+            }
+            
+            # Also check standard installation paths
+            $standardPaths = @(
+              "${env:ProgramFiles}\NSIS",
+              "${env:ProgramFiles(x86)}\NSIS"
+            )
+            
+            foreach ($nsisDir in $standardPaths) {
+              $makeNsisPath = Join-Path $nsisDir "makensis.exe"
+              Write-Host "Checking: $makeNsisPath"
+              if (Test-Path $makeNsisPath) {
+                Write-Host "✓ Found NSIS at: $nsisDir"
+                $env:PATH = "$nsisDir;$env:PATH"
+                Write-Host "Added to PATH: $nsisDir"
+                break
+              }
+            }
+          }
+          
+          # Verify makensis is now available
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
+          if ($makensis) {
+            Write-Host "✓ makensis available at: $($makensis.Source)"
+            # Export PATH for subsequent steps
+            echo "PATH=$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            Write-Host "❌ makensis still not found after installation"
+            Write-Host "Chocolatey packages installed:"
+            choco list --local-only | Where-Object { $_ -match 'nsis' }
+            exit 1
+          }
+          
+      - name: Verify NSIS is available
+        shell: pwsh
+        run: |
+          Write-Host "Verifying NSIS is available..."
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
+          
+          if ($makensis) {
+            Write-Host "✓ makensis found at: $($makensis.Source)"
+            & makensis /VERSION
+            Write-Host "✓ NSIS is ready for use"
+          } else {
+            Write-Host "❌ makensis not available - this shouldn't happen after installation"
+            exit 1
+          }
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Check available Qt architectures
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade aqtinstall
+          python -m aqt list-qt windows desktop --arch 6.2.4 || echo "Failed to list 6.2.4"
+          python -m aqt list-qt windows desktop --arch 6.5.3 || echo "Failed to list 6.5.3"
+          python -m aqt list-qt windows desktop 6.2 || echo "Failed to list 6.2"
+        continue-on-error: true
+
+      - name: Install Qt 6.2.4 LTS
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.2.4'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          dir: 'C:\\Qt'
+          cache: true
+          setup-python: false
+          cache-key-prefix: 'install-qt-action-624'
+          extra: '--autodesktop'
+        continue-on-error: true
+        id: install-qt-624
+
+      - name: Install Qt 6.2.4 with mingw (fallback)
+        if: steps.install-qt-624.outcome == 'failure'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.2.4'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_mingw'
+          dir: 'C:\\Qt'
+          cache: true
+          setup-python: false
+          cache-key-prefix: 'install-qt-action-624-mingw'
+          extra: '--autodesktop'
+        continue-on-error: true
+        id: install-qt-624-mingw
+
+      - name: Download DuckDB
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/windows/download-duckdb.ps1
+
+      - name: Verify DuckDB download
+        shell: pwsh
+        run: |
+          Write-Host "Contents of duckdb directory:"
+          if (Test-Path "$Env:GITHUB_WORKSPACE\duckdb") {
+            Get-ChildItem "$Env:GITHUB_WORKSPACE\duckdb" -Recurse
+          } else {
+            Write-Host "duckdb directory not found!"
+          }
+          Write-Host "Looking for duckdb.hpp specifically:"
+          Get-ChildItem "$Env:GITHUB_WORKSPACE\duckdb" -Filter "duckdb.hpp" -Recurse -ErrorAction SilentlyContinue
+
+      - name: Locate Qt6
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/windows/locate-qt6.ps1
+
+      - name: Configure CMake
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/windows/configure-cmake.ps1
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build --config Release --parallel 2
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "Installing Inno Setup via Chocolatey..."
+          choco install -y innosetup
+          Import-Module $env:ChocolateyInstall\helpers\chocolateyProfile.psm1
+          refreshenv
+
+      - name: Package into Windows installer (Inno Setup)
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/windows/package-iss.ps1
+
+      - name: Verify installer creation
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/windows/verify-package.ps1
+
+      - name: Show workspace files (debug)
+        shell: pwsh
+        run: |
+          Write-Host "Workspace root contents:"
+          Get-ChildItem -Path $Env:GITHUB_WORKSPACE -Recurse -Depth 2 | Select-Object FullName | ForEach-Object { Write-Host $_.FullName }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: bello-windows-installer
+          path: ${{ github.workspace }}/bello-1.0.0-windows-x64.exe
+          if-no-files-found: error

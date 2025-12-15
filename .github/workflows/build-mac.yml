@@ -1,0 +1,72 @@
+name: Build macOS and package .dmg/.zip
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: osx-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        brew update
+        brew install cmake pkg-config wget unzip
+        brew install ossp-uuid
+        brew install qt@6
+
+    - name: Download DuckDB prebuilt (mac)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Use the correct macOS universal asset name
+        DUCKDB_URL="https://github.com/duckdb/duckdb/releases/download/v1.4.3/libduckdb-osx-universal.zip"
+        echo "Downloading DuckDB from: $DUCKDB_URL"
+        # fail fast on HTTP errors (-f), follow redirects (-L), show errors (-S)
+        curl -fSL "$DUCKDB_URL" -o /tmp/duckdb.zip
+        mkdir -p /tmp/duckdb_extract
+        unzip -o /tmp/duckdb.zip -d /tmp/duckdb_extract
+        rm -rf duckdb
+        mkdir -p duckdb
+        cp -r /tmp/duckdb_extract/* duckdb/ || true
+        ls -la duckdb || true
+
+    - name: Make build script executable
+      shell: bash
+      run: |
+        chmod +x ./build.sh
+
+    - name: Build (use build.sh, mac DuckDB)
+      shell: bash
+      run: |
+        # duckdb/ is pre-populated earlier in this workflow; no need to pass --duckdb-url
+        ./build.sh --no-run
+
+    - name: Create .app + dmg + zip
+      shell: bash
+      run: |
+        set -euo pipefail
+        OUTDIR="$GITHUB_WORKSPACE/out"
+        rm -rf "$OUTDIR"
+        mkdir -p "$OUTDIR/bello.app/Contents/MacOS"
+        cp build/bello "$OUTDIR/bello.app/Contents/MacOS/bello"
+        chmod +x "$OUTDIR/bello.app/Contents/MacOS/bello"
+        mkdir -p "$OUTDIR/bello.app/Contents"
+        cp "$GITHUB_WORKSPACE/.github/package-templates/Info.plist" "$OUTDIR/bello.app/Contents/Info.plist"
+        if command -v macdeployqt >/dev/null 2>&1; then
+          macdeployqt "$OUTDIR/bello.app" || true
+        fi
+        DMG="$GITHUB_WORKSPACE/bello-1.0.0-osx.dmg"
+        hdiutil create -volname Bello -srcfolder "$OUTDIR/bello.app" -ov -format UDZO "$DMG"
+        (cd "$OUTDIR" && zip -r "$GITHUB_WORKSPACE/bello-1.0.0-osx.zip" bello.app)
+
+    - name: Upload mac artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: bello-osx
+        path: |
+          ${{ github.workspace }}/bello-1.0.0-osx.dmg
+          ${{ github.workspace }}/bello-1.0.0-osx.zip

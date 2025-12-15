@@ -1,0 +1,51 @@
+name: Build Linux (Ubuntu) and package .deb
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake pkg-config unzip wget dpkg-dev
+        sudo apt-get install -y uuid-dev libxkbcommon-dev
+        sudo apt-get install -y qt6-base-dev qt6-base-dev-tools
+
+    - name: Make build script executable
+      shell: bash
+      run: |
+        chmod +x ./build.sh
+
+    - name: Build (use repository build.sh)
+      shell: bash
+      run: |
+        ./build.sh --no-run
+
+    - name: Package .deb
+      shell: bash
+      run: |
+        set -euo pipefail
+        PKGROOT="$GITHUB_WORKSPACE/pkgroot"
+        rm -rf "$PKGROOT"
+        mkdir -p "$PKGROOT/usr/bin"
+        install -m 0755 build/bello "$PKGROOT/usr/bin/bello"
+        if [ -d "$GITHUB_WORKSPACE/duckdb" ]; then
+          mkdir -p "$PKGROOT/usr/lib/bello-duckdb"
+          cp -r "$GITHUB_WORKSPACE/duckdb"/* "$PKGROOT/usr/lib/bello-duckdb/" || true
+        fi
+        mkdir -p "$PKGROOT/DEBIAN"
+        cp "$GITHUB_WORKSPACE/.github/package-templates/debian_control" "$PKGROOT/DEBIAN/control"
+        dpkg-deb --build "$PKGROOT" "$GITHUB_WORKSPACE/bello_1.0.0_amd64.deb"
+
+    - name: Upload artifact (.deb)
+      uses: actions/upload-artifact@v4
+      with:
+        name: bello-linux-deb
+        path: ${{ github.workspace }}/bello_1.0.0_amd64.deb
