@@ -40,9 +40,15 @@ Use Cmd instead of Ctrl on macOS.
 
 ## Binaries
 
-* [Ubuntu](foo.bar)
-* [Windows](foo.bar)
+Bello GUI:
+
+* [Ubuntu](https://github.com/pachadotdev/bello/releases/download/v1.0.0/bello_1.0.0_amd64.deb)
+* [Windows](https://github.com/pachadotdev/bello/releases/download/v1.0.0/bello-1.0.0-windows-x64.exe)
 * macOS - for some reason GitHub Actions does not start the macOS runners, please wait a bit or build from source.
+
+Browser extensions:
+
+* [Firefox](https://github.com/pachadotdev/bello/releases/download/v1.0.0/bello-connector.xpi)
 
 ## Build from source
 
