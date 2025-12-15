@@ -1,20 +1,20 @@
 # Bello — A Lightweight Reference Manager
 
-This folder contains Bello, a minimal reference manager similar to Zotero's core functionality.
+This repository contains Bello, a minimal reference manager similar to Zotero's core functionality.
 
 Why 'Bello'? As a tribute to [Andres Bello](https://en.wikipedia.org/wiki/Andr%C3%A9s_Bello), a Venezuelan-Chilean poet, jurist, philologist, and educator who made significant contributions to Latin American literature and legal systems. He also led the creation of the University of Chile in 1842.
 
 The software is much faster than Zotero because it uses DuckDB instead of SQLite, and Qt instead of Electron. This is not a fork, but a separate project that aims to provide a minimal reference manager with local-only storage and native performance.
 
-I made this because with my arthritis I sent a PR to Zotero that allowed me to copy Bibtex entries to clipboard, but it was rejected after they told me that "quick copy" is for that (it is not the same, I proposed an ergonomic way).
+I made this because with my arthritis I sent a PR to Zotero that allowed me to copy Bibtex entries to the clipboard, but it was rejected after they told me that "quick copy" is for that (it is not the same, I proposed an ergonomic way).
 
-I built a connector for Firefox/Chrome that needs extra testing it will be publicly available soon.
+I built a connector for Firefox to allow a 1-click import from different sites (Ex-Libris,  Google Books, etc).
 
 ![Bello in action](demo.png)
 
 If this software is useful to you, consider buying me a coffee:
 
-[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://buymeacoffee.com/pacha/e/414420)
+[<a href="https://buymeacoffee.com/pacha/e/414420" target="_blank" rel="noopener noreferrer"><img src="https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg" alt="Buy me a coffee" width="260"></a>]
 
 ## Features
 
@@ -36,9 +36,7 @@ Use Cmd instead of Ctrl on macOS.
 * `Ctrl+C`: Copy selected items to clipboard
 * `Ctrl+Shift+C`: Copy Bibtex entry of selected items to clipboard
 
-## Installing
-
-## Binaries
+## Installing from Binaries
 
 Bello GUI:
 
@@ -50,7 +48,7 @@ Browser extensions:
 
 * [Firefox](https://github.com/pachadotdev/bello/releases/download/v1.0.0/bello-connector.xpi)
 
-## Build from source
+## Install from Source
 
 To build on Unix-based systems, like Linux or macOS, you need the build tools and  Qt6 installed.
 
@@ -65,20 +63,24 @@ sudo pacman -S qt6-base qtcreator cmake ninja
 ./build.sh --install
 ```
 
-## Testing
+## Development
 
-1) Test build with CMake (*):
+To test changes to the GUI and/or connector, follow these steps:
+
+1) Build GUI using CMake (*):
 
 ```bash
 rm -rf build
 ./build.sh
 ```
 
-2) Test the connector
+2) Build the connector in a new terminal:
 
 ```bash
 npx --yes web-ext run --source-dir connector --verbose
 ```
+
+Both terminals will display informative messages about what is happening. I use `examples.md` to check how changes affect the currently working importer and app-browser integration.
 
 (*) The script will download and use the following DuckDB binaries:
 
