@@ -14,7 +14,7 @@ I built a connector for Firefox to allow a 1-click import from different sites (
 
 If this software is useful to you, consider buying me a coffee:
 
-[<a href="https://buymeacoffee.com/pacha/e/414420" target="_blank" rel="noopener noreferrer"><img src="https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg" alt="Buy me a coffee" width="260"></a>]
+<a href="https://buymeacoffee.com/pacha/e/414420" target="_blank" rel="noopener noreferrer"><img src="https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg" alt="Buy me a coffee" width="220"></a>
 
 ## Features
 
