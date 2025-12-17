@@ -477,12 +477,113 @@
         extractCreators() {
             let rawAuthors = [];
             const _host = (location.host || '').toLowerCase();
+            
+            // Helper function to push author strings - defined early so it can be used throughout
+            const pushRaw = (s) => {
+                if (!s) return;
+                // Normalize whitespace
+                let clean = String(s).replace(/\s+/g, ' ').trim();
+                // Remove common UI tokens that sometimes get appended (e.g., 'and $3.50')
+                clean = clean.replace(/\s*(?:and\s*)?(?:\$|USD\s*\$|£|GBP|€|EUR)\s*[0-9]{1,3}(?:[\.,][0-9]{1,2})?\b/gi, '').trim();
+                // Remove trailing price words like 'Buy for $3.50' or isolated currency tokens
+                clean = clean.replace(/(?:buy for|purchase for)\s*(?:\$|USD\s*\$)?\s*[0-9]+(?:[\.,][0-9]+)?/i, '').trim();
+                // Remove UI tokens that sometimes get included in author blobs
+                clean = clean.replace(/\b(?:more|hide|show all|show less|show|Show All|Show Less|Hide|More|Less|All)\b[\s,:;\-]*/gi, '').trim();
+                // Remove standalone UI noise words
+                if (/^(more|hide|show|less|all|Show|All|Less|Hide|More|and|or)$/i.test(clean)) return;
+                // Remove UI extras like 'About the Book' accidentally captured as author/title
+                if (/^about\s+the\s+book$/i.test(clean)) return;
+                // Skip if too short after cleaning
+                if (clean.length < 2) return;
+                // Don't split on 'and' within names - just push as-is and handle dedup later
+                // Split only on explicit list separators
+                clean.split(/\s*(?:;|\||\n)\s*/).map(x => x.trim()).filter(Boolean).forEach(a => {
+                    if (a && a.length >= 2 && !/^(more|hide|show|less|all|and|or)$/i.test(a)) {
+                        rawAuthors.push(a);
+                    }
+                });
+            };
+            
             // Primo / Ex Libris targeted quick-extract: prefer labeled creator fields
             let primoExtracted = false;
+            const primoSeenAuthors = new Set(); // Track seen authors to prevent duplicates
             try {
                 if (_host.includes('primo') || _host.includes('exlibris') || /discovery\/fulldisplay/i.test(location.href)) {
-                    const primoNodes = Array.from(document.querySelectorAll('[data-details-label="creator"], [data-details-label="creators"], .displayCreator, .displayCreators, .recordAuthors, .recordAuthor'));
-                    if (primoNodes.length) {
+                    // Helper to clean and validate author text
+                    const cleanAuthorText = (txt) => {
+                        if (!txt) return null;
+                        // Remove UI noise words
+                        let clean = txt.replace(/\b(more|hide|show all|show less|show|Show All|Show Less|Hide|More|Less|All)\b/gi, '').trim();
+                        // Remove extra whitespace
+                        clean = clean.replace(/\s+/g, ' ').trim();
+                        // Skip if too short, empty, or just noise
+                        if (!clean || clean.length < 2) return null;
+                        if (/^(more|hide|show|less|all|and|or)$/i.test(clean)) return null;
+                        // Skip if it's just punctuation or numbers
+                        if (/^[\s\d;,.\-]+$/.test(clean)) return null;
+                        return clean;
+                    };
+                    
+                    // Look for author/creator sections in Primo
+                    // Method 1: Look for specific data-qa attributes used in modern Primo
+                    const creatorSections = document.querySelectorAll('[data-qa="alma-creator"], [data-qa="creator"], prm-search-result-availability-line span[translate]');
+                    for (const section of creatorSections) {
+                        const txt = cleanAuthorText(section.textContent);
+                        if (txt && !primoSeenAuthors.has(txt.toLowerCase())) {
+                            primoSeenAuthors.add(txt.toLowerCase());
+                            pushRaw(txt);
+                            primoExtracted = true;
+                        }
+                    }
+                    
+                    // Method 2: Look in item details for creator/author row
+                    const detailsRows = document.querySelectorAll('.item-details-element-container, [class*="full-view-section"]');
+                    for (const row of detailsRows) {
+                        // Check if this row is about creators/authors
+                        const labelEl = row.querySelector('.item-details-element-header span, .item-details-label, span[translate*="creator"]');
+                        const labelText = labelEl ? (labelEl.textContent || '').toLowerCase() : '';
+                        if (!labelText.includes('creator') && !labelText.includes('author') && !labelText.includes('contributor')) {
+                            continue;
+                        }
+                        
+                        // Get the value container
+                        const valueContainer = row.querySelector('.item-details-element-value, .item-details-value');
+                        if (!valueContainer) continue;
+                        
+                        // Extract individual author links/spans, but skip buttons
+                        const authorLinks = valueContainer.querySelectorAll('a:not([class*="button"]):not([class*="toggle"]):not([class*="show"]), prm-highlight');
+                        for (const link of authorLinks) {
+                            // Skip if the link has button-like classes or attributes
+                            const classList = link.className || '';
+                            if (/button|toggle|show-more|show-less|collapse|expand/i.test(classList)) continue;
+                            
+                            const txt = cleanAuthorText(link.textContent);
+                            if (txt && !primoSeenAuthors.has(txt.toLowerCase())) {
+                                primoSeenAuthors.add(txt.toLowerCase());
+                                pushRaw(txt);
+                                primoExtracted = true;
+                            }
+                        }
+                        
+                        // If no links found, try splitting text content by semicolons
+                        if (!primoExtracted || primoSeenAuthors.size === 0) {
+                            const rawText = cleanAuthorText(valueContainer.textContent);
+                            if (rawText) {
+                                rawText.split(/\s*;\s*/).forEach(part => {
+                                    const txt = cleanAuthorText(part);
+                                    if (txt && !primoSeenAuthors.has(txt.toLowerCase())) {
+                                        primoSeenAuthors.add(txt.toLowerCase());
+                                        pushRaw(txt);
+                                        primoExtracted = true;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    
+                    // Method 3: Fallback to old selectors if nothing found yet
+                    if (!primoExtracted || primoSeenAuthors.size === 0) {
+                        const primoNodes = Array.from(document.querySelectorAll('[data-details-label="creator"], [data-details-label="creators"], .displayCreator, .displayCreators, .recordAuthors, .recordAuthor'));
                         for (const node of primoNodes) {
                             // Find a nearby value container
                             let valueEl = node.nextElementSibling || (node.parentElement && (node.parentElement.querySelector('.displayFieldValue, .displayValue, .value, dd, td, .item-details-element-container')));
@@ -495,33 +596,42 @@
                                 }
                             }
                             if (valueEl) {
-                                // Prefer anchor/span nodes representing individual creators
-                                const items = valueEl.querySelectorAll('a, span, prm-highlight');
-                                if (items && items.length) {
-                                    for (const it of items) {
-                                        const txt = (it.textContent || '').replace(/\b(more|hide|show all|show less|show|Show All|Show Less|Hide|More)\b/gi,'').trim();
-                                        if (txt && txt.length > 1 && !/^(more|hide|show|less|all)$/i.test(txt)) pushRaw(txt);
-                                    }
-                                    primoExtracted = true;
-                                    continue;
-                                }
-                                // fallback: split on newlines or semicolons within the value text
-                                const raw = (valueEl.textContent || '').replace(/\b(more|hide|show all|show less|show|Show All|Show Less|Hide|More)\b/gi,'').trim();
-                                if (raw) {
-                                    raw.split(/\s*\n\s*|\s*;\s*|\s*\|\s*/).map(x=>x.trim()).filter(Boolean).forEach(s=> {
-                                        if (s && s.length > 1 && !/^(more|hide|show|less|all)$/i.test(s)) pushRaw(s);
+                                // Split by semicolons for cleaner extraction
+                                const rawText = cleanAuthorText(valueEl.textContent);
+                                if (rawText) {
+                                    rawText.split(/\s*;\s*/).forEach(part => {
+                                        const txt = cleanAuthorText(part);
+                                        if (txt && !primoSeenAuthors.has(txt.toLowerCase())) {
+                                            primoSeenAuthors.add(txt.toLowerCase());
+                                            pushRaw(txt);
+                                            primoExtracted = true;
+                                        }
                                     });
-                                    primoExtracted = true;
                                 }
                             }
                         }
-                        // If we found Primo creators, skip the noisy generic extractions below
-                        if (primoExtracted && rawAuthors.length > 0) {
-                            // Go straight to normalization
-                        }
                     }
                 }
-            } catch(e) {}
+            } catch(e) {
+                console.debug('Bello: Primo author extraction error', e);
+            }
+            
+            // If Primo extraction found nothing, try citation_author meta tags (common in library systems)
+            if (primoExtracted && primoSeenAuthors.size === 0) {
+                primoExtracted = false; // Reset so generic extraction runs
+            }
+            
+            // For Primo, also check if we got bad data and should reset
+            if (primoExtracted && rawAuthors.length > 0) {
+                // Check if the data looks like garbage (too many duplicates or noise words)
+                const hasNoise = rawAuthors.some(a => /\b(more|hide|show|less|all)\b/i.test(a));
+                if (hasNoise) {
+                    rawAuthors = []; // Clear and let generic extraction try
+                    primoSeenAuthors.clear();
+                    primoExtracted = false;
+                }
+            }
+            
             const _isGoogleBooks = _host.includes('books.google') || /\/books\/(edition|viewer|reader|book)/i.test(location.href);
             const _isLikelyName = (n) => {
                 if (!n) return false;
@@ -538,24 +648,6 @@
                 // Two or three capitalized words (simple unicode-aware test)
                 if (/^[A-ZÀ-ÖÙ-Ý][\p{L}A-Za-z'`.-]+(\s+[A-ZÀ-ÖÙ-Ý][\p{L}A-Za-z'`.-]+){1,2}$/u.test(s)) return true;
                 return false;
-            };
-
-            const pushRaw = (s) => {
-                if (!s) return;
-                // Normalize whitespace
-                let clean = String(s).replace(/\s+/g, ' ').trim();
-                // Remove common UI tokens that sometimes get appended (e.g., 'and $3.50')
-                clean = clean.replace(/\s*(?:and\s*)?(?:\$|USD\s*\$|£|GBP|€|EUR)\s*[0-9]{1,3}(?:[\.,][0-9]{1,2})?\b/gi, '').trim();
-                // Remove trailing price words like 'Buy for $3.50' or isolated currency tokens
-                clean = clean.replace(/(?:buy for|purchase for)\s*(?:\$|USD\s*\$)?\s*[0-9]+(?:[\.,][0-9]+)?/i, '').trim();
-                // Remove UI tokens that sometimes get included in author blobs
-                clean = clean.replace(/\b(?:more|hide|show all|show less|show|Show All|Show Less|Hide|More|Less|All)\b[\s,:;\-]*/gi, '').trim();
-                // Remove standalone UI noise words
-                if (/^(more|hide|show|less|all|Show|All|Less|Hide|More)$/i.test(clean)) return;
-                // Remove UI extras like 'About the Book' accidentally captured as author/title
-                if (/^about\s+the\s+book$/i.test(clean)) return;
-                // Split lists in common formats
-                clean.split(/\s*(?:;|\||\n|,\sand\s|\band\b)\s*/i).map(x => x.trim()).filter(Boolean).forEach(a => rawAuthors.push(a));
             };
 
             // Skip noisy generic extractions if Primo extraction already succeeded
@@ -651,60 +743,64 @@
                     });
                 }
             } catch (e) {}
-            // JSON-LD authors handled elsewhere
-            try {
-                const json = this.extractJSONLD();
-                if (json && json.authors) {
-                    if (Array.isArray(json.authors)) json.authors.forEach(a => pushRaw(typeof a === 'string' ? a : (a.name || '')));
-                    else pushRaw(typeof json.authors === 'string' ? json.authors : (json.authors.name || ''));
-                }
-            } catch (e) {}
-
-            // If none found, try generic meta author
-            if (rawAuthors.length === 0) {
-                const el = document.querySelector('meta[name="author"]');
-                if (el) pushRaw(el.getAttribute('content') || el.textContent);
-            }
-
-            // Label-based metadata (dt/dd, th/td, label/strong pairs) for library pages
-            try {
-                const labelEls = document.querySelectorAll('dt, th, strong, b, label');
-                for (const el of labelEls) {
-                    const t = (el.textContent || '').trim();
-                    if (!t) continue;
-                    if (/^author(s)?[:\s]/i.test(t) || /^creator(s)?[:\s]/i.test(t) || /\bAuthor(s)?\b/i.test(t) || /\bCreator(s)?\b/i.test(t) || /\bContributor(s)?\b/i.test(t)) {
-                        let candidate = el.nextElementSibling || (el.parentElement && el.parentElement.querySelector('dd, td, .value, .displayValue')) || null;
-                        if (candidate && candidate.textContent) pushRaw(candidate.textContent);
-                        else {
-                            const alt = el.parentElement && (el.parentElement.querySelector('.displayCreator, .displayCreators, .recordAuthors, .creator, .authors, .value'));
-                            if (alt && alt.textContent) pushRaw(alt.textContent);
-                        }
+            
+            // Skip all remaining generic extractions if Primo extraction already succeeded
+            if (!primoExtracted) {
+                // JSON-LD authors handled elsewhere
+                try {
+                    const json = this.extractJSONLD();
+                    if (json && json.authors) {
+                        if (Array.isArray(json.authors)) json.authors.forEach(a => pushRaw(typeof a === 'string' ? a : (a.name || '')));
+                        else pushRaw(typeof json.authors === 'string' ? json.authors : (json.authors.name || ''));
                     }
-                }
-            } catch (e) {}
+                } catch (e) {}
 
-            // Primo / Ex Libris targeted heuristics: look for label/value pairs commonly used
-            try {
-                const primoLabels = document.querySelectorAll('.displayFieldLabel, .displayFieldValue, .displayField, .recordDisplay .displayFieldLabel, .recordDisplay .displayField');
-                for (const lbl of primoLabels) {
-                    const txt = (lbl.textContent || '').trim();
-                    if (!txt) continue;
-                    if (/^author(s)?$/i.test(txt) || /^creator(s)?$/i.test(txt) || /\bauthor(s)?\b/i.test(txt)) {
-                        // value may be next sibling or within the parent container
-                        let valEl = lbl.nextElementSibling || (lbl.parentElement && lbl.parentElement.querySelector('.displayFieldValue, .displayValue, .value, dd, td')) || null;
-                        let val = valEl && valEl.textContent ? valEl.textContent.trim() : '';
-                        if (!val) {
-                            // sometimes the label and value are siblings two levels up
-                            const container = lbl.closest('.displayField, .recordDisplay, .record');
-                            if (container) {
-                                const v2 = container.querySelector('.displayFieldValue, .value, .displayValue, dd, td');
-                                if (v2 && v2.textContent) val = v2.textContent.trim();
+                // If none found, try generic meta author
+                if (rawAuthors.length === 0) {
+                    const el = document.querySelector('meta[name="author"]');
+                    if (el) pushRaw(el.getAttribute('content') || el.textContent);
+                }
+
+                // Label-based metadata (dt/dd, th/td, label/strong pairs) for library pages
+                try {
+                    const labelEls = document.querySelectorAll('dt, th, strong, b, label');
+                    for (const el of labelEls) {
+                        const t = (el.textContent || '').trim();
+                        if (!t) continue;
+                        if (/^author(s)?[:\s]/i.test(t) || /^creator(s)?[:\s]/i.test(t) || /\bAuthor(s)?\b/i.test(t) || /\bCreator(s)?\b/i.test(t) || /\bContributor(s)?\b/i.test(t)) {
+                            let candidate = el.nextElementSibling || (el.parentElement && el.parentElement.querySelector('dd, td, .value, .displayValue')) || null;
+                            if (candidate && candidate.textContent) pushRaw(candidate.textContent);
+                            else {
+                                const alt = el.parentElement && (el.parentElement.querySelector('.displayCreator, .displayCreators, .recordAuthors, .creator, .authors, .value'));
+                                if (alt && alt.textContent) pushRaw(alt.textContent);
                             }
                         }
-                        if (val) pushRaw(val);
                     }
-                }
-            } catch (e) {}
+                } catch (e) {}
+
+                // Primo / Ex Libris targeted heuristics: look for label/value pairs commonly used
+                try {
+                    const primoLabels = document.querySelectorAll('.displayFieldLabel, .displayFieldValue, .displayField, .recordDisplay .displayFieldLabel, .recordDisplay .displayField');
+                    for (const lbl of primoLabels) {
+                        const txt = (lbl.textContent || '').trim();
+                        if (!txt) continue;
+                        if (/^author(s)?$/i.test(txt) || /^creator(s)?$/i.test(txt) || /\bauthor(s)?\b/i.test(txt)) {
+                            // value may be next sibling or within the parent container
+                            let valEl = lbl.nextElementSibling || (lbl.parentElement && lbl.parentElement.querySelector('.displayFieldValue, .displayValue, .value, dd, td')) || null;
+                            let val = valEl && valEl.textContent ? valEl.textContent.trim() : '';
+                            if (!val) {
+                                // sometimes the label and value are siblings two levels up
+                                const container = lbl.closest('.displayField, .recordDisplay, .record');
+                                if (container) {
+                                    const v2 = container.querySelector('.displayFieldValue, .value, .displayValue, dd, td');
+                                    if (v2 && v2.textContent) val = v2.textContent.trim();
+                                }
+                            }
+                            if (val) pushRaw(val);
+                        }
+                    }
+                } catch (e) {}
+            } // end if (!primoExtracted)
 
             // If on Google Books, filter out noisy metadata blobs (ISBN, publisher, page counts)
             try {
