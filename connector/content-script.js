@@ -10,6 +10,41 @@
     if (window.belloConnectorInjected) return;
     window.belloConnectorInjected = true;
     console.debug('Bello content-script: injected');
+
+    // Accessibility helper: remove empty <md-tooltip> elements and
+    // fill missing aria-labels for elements that rely on tooltips.
+    // This is a light, best-effort fix to reduce noisy console
+    // warnings from third-party pages (e.g., Primo). It runs once
+    // on page load and is intentionally non-invasive.
+    function _bello_fixEmptyTooltips() {
+        try {
+            // Remove empty md-tooltip elements
+            document.querySelectorAll('md-tooltip, [md-tooltip]').forEach(t => {
+                if (!t.textContent || !t.textContent.trim()) t.remove();
+            });
+
+            // Fill missing aria-labels for elements that use md-labeled-by-tooltip
+            document.querySelectorAll('[md-labeled-by-tooltip]').forEach(el => {
+                const aria = el.getAttribute('aria-label') || '';
+                if (!aria.trim()) {
+                    const text = (el.innerText || el.title || el.getAttribute('title') || '').trim();
+                    if (text) el.setAttribute('aria-label', text);
+                    else el.removeAttribute('md-labeled-by-tooltip');
+                }
+            });
+        } catch (e) {
+            console.debug('Bello content-script: tooltip-fix failed', e);
+        }
+    }
+
+    function _bello_scheduleTooltipFix() {
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+            setTimeout(_bello_fixEmptyTooltips, 50);
+        } else {
+            document.addEventListener('DOMContentLoaded', () => setTimeout(_bello_fixEmptyTooltips, 50));
+        }
+    }
+    _bello_scheduleTooltipFix();
     
     // Simple translator detection
     class BelloTranslator {
@@ -1591,6 +1626,270 @@
                 window.dispatchEvent(new CustomEvent('bello-response-extract', { detail: { success: false, error: err && err.message ? err.message : String(err) } }));
             }
         }, false);
+        // Allow page scripts to request attachment discovery via CustomEvent
+        // (This mirrors the chrome.runtime.onMessage 'findAttachments' handler for use by page scripts)
+        window.addEventListener('bello-request-findAttachments', function(_ev) {
+            try {
+                const results = [];
+                // meta tags commonly used by publishers
+                const metaSelectors = [
+                    'meta[name="citation_pdf_url"]',
+                    'meta[name="citation_fulltext_pdf"]',
+                    'meta[name="citation_fulltext_html_url"]',
+                    'meta[name="pdf_url"]',
+                    'link[type="application/pdf"]',
+                    'meta[property="og:pdf"]'
+                ];
+                for (const sel of metaSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        const v = el.getAttribute('content') || el.getAttribute('href') || el.getAttribute('src') || '';
+                        if (v && !results.includes(v)) results.push(v);
+                    });
+                }
+
+                // Primo / Ex Libris specific detection
+                const isPrimoPage = /primo|exlibris|discovery\/fulldisplay/i.test(location.href) || 
+                                    document.querySelector('prm-full-view, prm-full-view-service-container, [class*="primo"]') !== null;
+                
+                if (isPrimoPage) {
+                    // Look for Primo service containers with links
+                    const primoServiceSelectors = [
+                        'prm-full-view-service-container a[href]',
+                        'prm-service-button a[href]',
+                        'prm-view-online a[href]',
+                        'prm-alma-viewit a[href]',
+                        '.service-type a[href]',
+                        '.getit-link a[href]',
+                        '[class*="viewit"] a[href]',
+                        '[class*="full-text"] a[href]'
+                    ];
+                    
+                    for (const sel of primoServiceSelectors) {
+                        try {
+                            document.querySelectorAll(sel).forEach(a => {
+                                const href = (a.getAttribute('href') || '').trim();
+                                if (!href || href === '#') return;
+                                const absHref = (() => { try { return new URL(href, location.href).toString(); } catch(e) { return href; } })();
+                                if (!results.includes(absHref)) results.push(absHref);
+                            });
+                        } catch (e) {}
+                    }
+                    
+                    // Look for OA/FullText buttons
+                    const oaKeywords = /\b(open access|view online|online access|full text|fulltext|view pdf|download pdf)\b/i;
+                    document.querySelectorAll('a[href], button[onclick], [role="button"]').forEach(el => {
+                        try {
+                            const text = (el.textContent || '').trim();
+                            if (oaKeywords.test(text) || oaKeywords.test(el.getAttribute('aria-label') || '')) {
+                                let href = el.getAttribute('href') || el.getAttribute('data-url') || '';
+                                if (!href || href === '#') {
+                                    const parentA = el.closest('a[href]');
+                                    if (parentA) href = parentA.getAttribute('href') || '';
+                                }
+                                if (href && href !== '#') {
+                                    const absHref = (() => { try { return new URL(href, location.href).toString(); } catch(e) { return href; } })();
+                                    if (!results.includes(absHref)) results.push(absHref);
+                                }
+                            }
+                        } catch (e) {}
+                    });
+                }
+
+                // Resolver patterns
+                const resolverPatterns = [
+                    /libkey\.(io|org|link)/i, /unpaywall\.org/i, /oadoi\.org/i, /doaj\.org/i,
+                    /core\.ac\.uk/i, /europepmc\.org/i, /arxiv\.org/i, /ssrn\.com/i
+                ];
+
+                document.querySelectorAll('a[href]').forEach(a => {
+                    try {
+                        const href = (a.getAttribute('href')||'').trim();
+                        if (!href || href === '#' || href.startsWith('javascript:')) return;
+                        const absHref = (() => { try { return new URL(href, location.href).toString(); } catch(e) { return href; } })();
+                        const lower = href.split('?')[0].toLowerCase();
+                        const text = (a.textContent||'').trim().toLowerCase();
+                        const cls = (a.className||'').toLowerCase();
+                        
+                        if (lower.endsWith('.pdf') || /\.pdf([?#]|$)/i.test(href)) {
+                            if (!results.includes(absHref)) results.push(absHref);
+                            return;
+                        }
+                        if (/\b(pdf|full text|download|fulltext|view online|view pdf|open pdf|online access)\b/i.test(text) || /\b(pdf|download|fulltext)\b/i.test(cls)) {
+                            if (!results.includes(absHref)) results.push(absHref);
+                            return;
+                        }
+                        if (a.dataset && (a.dataset.url || a.dataset.href || a.dataset.resource || a.dataset.pdfUrl)) {
+                            const candidate = a.dataset.url || a.dataset.href || a.dataset.resource || a.dataset.pdfUrl;
+                            try { const cabs = new URL(candidate, location.href).toString(); if (!results.includes(cabs)) results.push(cabs); } catch(e) {}
+                        }
+                        // Check resolver services
+                        for (const pattern of resolverPatterns) {
+                            if (pattern.test(absHref.toLowerCase())) {
+                                if (!results.includes(absHref)) results.push(absHref);
+                                return;
+                            }
+                        }
+                    } catch (e) {}
+                });
+
+                try {
+                    Array.from(document.querySelectorAll('iframe[src], embed[src], object[data]')).forEach(el => {
+                        try {
+                            const src = el.getAttribute('src') || el.getAttribute('data') || '';
+                            if (!src) return;
+                            if (/\.pdf([?#]|$)/i.test(src) || /(application|pdf)/i.test(el.type || '')) {
+                                const abs = new URL(src, location.href).toString(); if (!results.includes(abs)) results.push(abs);
+                            }
+                        } catch(e) {}
+                    });
+                } catch (e) {}
+
+                const absResults = results.map(u => {
+                    try { return new URL(u, location.href).toString(); } catch (e) { return null; }
+                }).filter(Boolean);
+                try {
+                    window.dispatchEvent(new CustomEvent('bello-response-findAttachments', { detail: { success: true, attachments: absResults } }));
+                } catch (e) {
+                    // fallback to string-only detail
+                    try { window.dispatchEvent(new CustomEvent('bello-response-findAttachments', { detail: { success: true, json: JSON.stringify({ attachments: absResults }) } })); } catch(e){}
+                }
+            } catch (err) {
+                try { window.dispatchEvent(new CustomEvent('bello-response-findAttachments', { detail: { success: false, error: err && err.message ? err.message : String(err) } })); } catch(e){}
+            }
+        }, false);
+
+        // Resolve an attachment URL: fetch it in page/content context, return either base64 (if PDF)
+        // or a list of candidate PDF URLs found in the returned HTML.
+        // Enhanced to handle resolver services (LibKey, Unpaywall, etc.) and follow redirects.
+        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+            if (message && message.action === 'resolveAttachment' && message.url) {
+                (async () => {
+                    try {
+                        const u = message.url;
+                        console.debug('Bello: resolveAttachment starting for:', u);
+                        
+                        // Check if this is a known resolver service - these often need special handling
+                        const isResolver = /libkey\.|unpaywall\.|oadoi\.|doaj\.|core\.ac\.uk|europepmc\.org|ncbi\.nlm\.nih\.gov\/pmc|arxiv\.org|ssrn\.com|researchgate\.net|academia\.edu|semanticscholar\.org|openaccess|resolve|sfx|linkresolver/i.test(u);
+                        
+                        const resp = await fetch(u, { credentials: 'include', redirect: 'follow' });
+                        const finalUrl = resp.url; // URL after all redirects
+                        console.debug('Bello: resolveAttachment fetched, final URL:', finalUrl, 'status:', resp.status);
+                        
+                        const ct = (resp.headers.get('content-type') || '').toLowerCase();
+                        
+                        // Check if we got a PDF (either by content-type or by URL pattern)
+                        if (ct.includes('application/pdf') || ct.includes('application/octet-stream') || 
+                            /\.pdf([?#]|$)/i.test(finalUrl) || /\.pdf([?#]|$)/i.test(u)) {
+                            const buf = await resp.arrayBuffer();
+                            // Verify it's actually a PDF by checking magic bytes
+                            const bytes = new Uint8Array(buf);
+                            const isPdfMagic = bytes.length > 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46; // %PDF
+                            
+                            if (isPdfMagic || ct.includes('application/pdf')) {
+                                let binary = '';
+                                const chunkSize = 0x8000;
+                                for (let i = 0; i < bytes.length; i += chunkSize) {
+                                    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+                                }
+                                const b64 = btoa(binary);
+                                const cd = resp.headers.get('content-disposition') || '';
+                                const m = cd ? (cd.match(/filename\*=UTF-8''([^;\n]+)/i) || cd.match(/filename=\"?([^\";\n]+)\"?/)) : null;
+                                let filename = m && m[1] ? decodeURIComponent(m[1]) : (new URL(finalUrl)).pathname.split('/').pop() || 'attachment.pdf';
+                                if (!filename.toLowerCase().endsWith('.pdf')) filename += '.pdf';
+                                console.debug('Bello: resolveAttachment got PDF, size:', bytes.length, 'filename:', filename);
+                                sendResponse({ success: true, pdf: true, filename, mime: 'application/pdf', data: b64 });
+                                return;
+                            }
+                        }
+
+                        // Otherwise parse HTML and search for candidate PDF links
+                        const text = await resp.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(text, 'text/html');
+                        const found = new Set();
+                        
+                        // For resolver pages, look for the actual PDF/download links
+                        // LibKey and similar services often have a "Download PDF" or "View PDF" button
+                        const downloadKeywords = /\b(download|view|get|access|open)\s*(pdf|full\s*text|article|paper)\b/i;
+                        
+                        // look for anchors, iframes, embeds, links
+                        doc.querySelectorAll('a[href], iframe[src], embed[src], object[data], link[href]').forEach(el => {
+                            try {
+                                const href = el.getAttribute('href') || el.getAttribute('src') || el.getAttribute('data') || '';
+                                if (!href || href === '#' || href.startsWith('javascript:')) return;
+                                
+                                const elText = (el.textContent || '').trim();
+                                const elClass = (el.className || '').toLowerCase();
+                                const elTitle = (el.getAttribute('title') || '').toLowerCase();
+                                
+                                // Direct PDF link
+                                if (/\.pdf([?#]|$)/i.test(href)) {
+                                    try { found.add(new URL(href, finalUrl).toString()); } catch(e) { found.add(href); }
+                                    return;
+                                }
+                                
+                                // Links with fulltext/download keywords in URL
+                                if (/full-text-file|fulltext|fulltxt|getpdf|download.*pdf|pdf.*download/i.test(href)) {
+                                    try { found.add(new URL(href, finalUrl).toString()); } catch(e) { found.add(href); }
+                                    return;
+                                }
+                                
+                                // Links with download/view PDF text
+                                if (downloadKeywords.test(elText) || downloadKeywords.test(elTitle) || 
+                                    /pdf|download|fulltext/i.test(elClass)) {
+                                    try { found.add(new URL(href, finalUrl).toString()); } catch(e) { found.add(href); }
+                                    return;
+                                }
+                                
+                                // LibKey specific: look for links to publisher sites
+                                if (isResolver && /doi\.org|wiley|elsevier|springer|tandfonline|sagepub|oup\.com|cambridge\.org|nature\.com|science\.org/i.test(href)) {
+                                    try { found.add(new URL(href, finalUrl).toString()); } catch(e) { found.add(href); }
+                                }
+                            } catch (e) {}
+                        });
+                        
+                        // also search for obvious URLs in scripts/json (often resolver services embed PDF URLs in JS)
+                        try {
+                            const scripts = Array.from(doc.querySelectorAll('script')).map(s => s.textContent || '').join('\n');
+                            // PDF URLs
+                            const urlRx = /https?:\/\/[\w\-./?=&%:#]+?\.pdf(\b|[?#])/ig;
+                            let m;
+                            while ((m = urlRx.exec(scripts)) !== null) {
+                                found.add(m[0]);
+                            }
+                            // Also look for pdfUrl, downloadUrl, etc in JSON
+                            const jsonUrls = scripts.match(/"(pdf[Uu]rl|download[Uu]rl|fulltext[Uu]rl|content[Uu]rl)"\s*:\s*"([^"]+)"/g);
+                            if (jsonUrls) {
+                                for (const match of jsonUrls) {
+                                    const urlMatch = match.match(/"([^"]+)"$/);
+                                    if (urlMatch && urlMatch[1]) {
+                                        try { found.add(new URL(urlMatch[1], finalUrl).toString()); } catch(e) { found.add(urlMatch[1]); }
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                        
+                        // Check meta tags for PDF URLs
+                        try {
+                            doc.querySelectorAll('meta[name*="pdf"], meta[property*="pdf"], meta[content*=".pdf"]').forEach(el => {
+                                const content = el.getAttribute('content') || '';
+                                if (content && /\.pdf([?#]|$)/i.test(content)) {
+                                    try { found.add(new URL(content, finalUrl).toString()); } catch(e) { found.add(content); }
+                                }
+                            });
+                        } catch (e) {}
+
+                        const final = Array.from(found);
+                        console.debug('Bello: resolveAttachment found', final.length, 'candidate URLs:', final);
+                        sendResponse({ success: true, pdf: false, urls: final, htmlLength: text.length, finalUrl: finalUrl });
+                    } catch (err) {
+                        console.debug('Bello: resolveAttachment error:', err);
+                        sendResponse({ success: false, error: err && err.message ? err.message : String(err) });
+                    }
+                })();
+                return true; // keep channel open for async sendResponse
+            }
+        });
         window.addEventListener('bello-request-translators', function(_ev) {
             try {
                 translator.detectTranslators();
@@ -1737,6 +2036,296 @@
                     priority: t.priority
                 }))
             });
+            return true;
+        }
+        // Find candidate attachments (PDFs) on the page and return URLs
+        if (message.action === 'findAttachments') {
+            try {
+                const results = [];
+                // meta tags commonly used by publishers
+                const metaSelectors = [
+                    'meta[name="citation_pdf_url"]',
+                    'meta[name="citation_fulltext_pdf"]',
+                    'meta[name="citation_fulltext_html_url"]',
+                    'meta[name="pdf_url"]',
+                    'link[type="application/pdf"]',
+                    'meta[property="og:pdf"]'
+                ];
+                for (const sel of metaSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        const v = el.getAttribute('content') || el.getAttribute('href') || el.getAttribute('src') || '';
+                        if (v && !results.includes(v)) results.push(v);
+                    });
+                }
+
+                // ======= Primo / Ex Libris specific detection =======
+                // Primo pages often have "View Online", "Full Text Available", "Online Access" buttons
+                // These are typically inside prm-full-view-service-container or similar Angular components
+                const isPrimoPage = /primo|exlibris|discovery\/fulldisplay/i.test(location.href) || 
+                                    document.querySelector('prm-full-view, prm-full-view-service-container, [class*="primo"]') !== null;
+                
+                if (isPrimoPage) {
+                    console.debug('Bello: Primo/ExLibris page detected, applying specialized extraction');
+                    
+                    // Look for Primo service containers with links
+                    const primoServiceSelectors = [
+                        'prm-full-view-service-container a[href]',
+                        'prm-service-button a[href]',
+                        'prm-view-online a[href]',
+                        'prm-alma-viewit a[href]',
+                        'prm-alma-openurl a[href]',
+                        '.service-type a[href]',
+                        '.getit-link a[href]',
+                        '.full-view-inner-container a[href]',
+                        '[class*="viewit"] a[href]',
+                        '[class*="openurl"] a[href]',
+                        '[class*="full-text"] a[href]',
+                        '[class*="fulltext"] a[href]'
+                    ];
+                    
+                    for (const sel of primoServiceSelectors) {
+                        try {
+                            document.querySelectorAll(sel).forEach(a => {
+                                const href = (a.getAttribute('href') || '').trim();
+                                if (!href || href === '#') return;
+                                const absHref = (() => { try { return new URL(href, location.href).toString(); } catch(e) { return href; } })();
+                                if (!results.includes(absHref)) {
+                                    console.debug('Bello: Found Primo service link:', absHref);
+                                    results.push(absHref);
+                                }
+                            });
+                        } catch (e) {}
+                    }
+                    
+                    // Look for buttons/links with Open Access, View Online, Full Text text
+                    const oaKeywords = /\b(open access|view online|online access|full text|fulltext|view pdf|download pdf|get pdf|free access|free pdf)\b/i;
+                    document.querySelectorAll('a[href], button[onclick], [role="button"]').forEach(el => {
+                        try {
+                            const text = (el.textContent || '').trim();
+                            const ariaLabel = el.getAttribute('aria-label') || '';
+                            const title = el.getAttribute('title') || '';
+                            
+                            if (oaKeywords.test(text) || oaKeywords.test(ariaLabel) || oaKeywords.test(title)) {
+                                // Try to get href directly
+                                let href = el.getAttribute('href') || '';
+                                
+                                // For buttons, look for onclick or data attributes
+                                if (!href || href === '#') {
+                                    href = el.getAttribute('data-url') || el.getAttribute('data-href') || 
+                                           el.getAttribute('data-link') || el.getAttribute('ng-href') || '';
+                                }
+                                
+                                // Check parent anchor if this is a span/icon inside a link
+                                if (!href || href === '#') {
+                                    const parentA = el.closest('a[href]');
+                                    if (parentA) href = parentA.getAttribute('href') || '';
+                                }
+                                
+                                if (href && href !== '#') {
+                                    const absHref = (() => { try { return new URL(href, location.href).toString(); } catch(e) { return href; } })();
+                                    if (!results.includes(absHref)) {
+                                        console.debug('Bello: Found OA/FullText link:', absHref, 'from text:', text.slice(0, 50));
+                                        results.push(absHref);
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                    });
+                    
+                    // Primo sometimes embeds links in Angular ng-click or data attributes
+                    document.querySelectorAll('[ng-click], [data-url], [data-pdfurl], [data-fulltext-url]').forEach(el => {
+                        try {
+                            const url = el.getAttribute('data-url') || el.getAttribute('data-pdfurl') || 
+                                       el.getAttribute('data-fulltext-url') || '';
+                            if (url && !results.includes(url)) {
+                                const absUrl = (() => { try { return new URL(url, location.href).toString(); } catch(e) { return url; } })();
+                                if (!results.includes(absUrl)) results.push(absUrl);
+                            }
+                        } catch (e) {}
+                    });
+                }
+
+                // ======= Resolver/OA service detection =======
+                // Common resolver and OA services that redirect to PDFs
+                const resolverPatterns = [
+                    /libkey\.(io|org|link)/i,
+                    /unpaywall\.org/i,
+                    /oadoi\.org/i,
+                    /doaj\.org/i,
+                    /core\.ac\.uk/i,
+                    /europepmc\.org/i,
+                    /ncbi\.nlm\.nih\.gov\/pmc/i,
+                    /arxiv\.org/i,
+                    /ssrn\.com/i,
+                    /researchgate\.net/i,
+                    /academia\.edu/i,
+                    /semanticscholar\.org/i,
+                    /openaccess/i,
+                    /fulltxt/i,
+                    /full-text/i,
+                    /getft/i,
+                    /resolve/i,
+                    /sfx/i,
+                    /linkresolver/i
+                ];
+
+                // Look for obvious anchors linking to PDFs and anchors whose text or classes indicate PDF/fulltext/download
+                document.querySelectorAll('a[href]').forEach(a => {
+                    try {
+                        const href = (a.getAttribute('href')||'').trim();
+                        if (!href || href === '#' || href.startsWith('javascript:')) return;
+                        const absHref = (() => { try { return new URL(href, location.href).toString(); } catch(e) { return href; } })();
+                        const lower = href.split('?')[0].toLowerCase();
+                        const text = (a.textContent||'').trim().toLowerCase();
+                        const cls = (a.className||'').toLowerCase();
+                        const ariaLabel = (a.getAttribute('aria-label') || '').toLowerCase();
+                        
+                        // direct PDF link
+                        if (lower.endsWith('.pdf') || /\.pdf([?#]|$)/i.test(href)) {
+                            if (!results.includes(absHref)) results.push(absHref);
+                            return;
+                        }
+                        // anchors that mention 'pdf', 'full text', 'download', 'view online'
+                        if (/\b(pdf|full text|download|fulltext|view online|view pdf|open pdf|online access|get it|access article)\b/i.test(text) || 
+                            /\b(pdf|download|fulltext|viewonline|openaccess)\b/i.test(cls) ||
+                            /\b(pdf|full text|download|view online)\b/i.test(ariaLabel)) {
+                            if (!results.includes(absHref)) results.push(absHref);
+                            return;
+                        }
+                        // some Primo links use data-attributes pointing to resources
+                        if (a.dataset && (a.dataset.url || a.dataset.href || a.dataset.resource || a.dataset.pdfUrl)) {
+                            const candidate = a.dataset.url || a.dataset.href || a.dataset.resource || a.dataset.pdfUrl;
+                            try { const cabs = new URL(candidate, location.href).toString(); if (!results.includes(cabs)) results.push(cabs); } catch(e) {}
+                        }
+                        // Check for resolver services
+                        try {
+                            const lh = absHref.toLowerCase();
+                            for (const pattern of resolverPatterns) {
+                                if (pattern.test(lh)) {
+                                    if (!results.includes(absHref)) {
+                                        console.debug('Bello: Found resolver/OA link:', absHref);
+                                        results.push(absHref);
+                                    }
+                                    return;
+                                }
+                            }
+                        } catch (e) {}
+                    } catch (e) {}
+                });
+
+                // ======= Unpaywall widget detection =======
+                // Unpaywall browser extension adds a widget; look for its data
+                try {
+                    const unpaywall = document.querySelector('[data-unpaywall-url], .unpaywall-icon, #unpaywall');
+                    if (unpaywall) {
+                        const url = unpaywall.getAttribute('data-unpaywall-url') || unpaywall.getAttribute('href');
+                        if (url && !results.includes(url)) {
+                            console.debug('Bello: Found Unpaywall link:', url);
+                            results.push(url);
+                        }
+                    }
+                } catch (e) {}
+
+                // JSON-LD or structured data: look for contentUrl / encoding
+                try {
+                    const jlds = Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => s.textContent).filter(Boolean);
+                    for (const raw of jlds) {
+                        try {
+                            const obj = JSON.parse(raw);
+                            const searchObj = (o) => {
+                                if (!o || typeof o !== 'object') return;
+                                if (Array.isArray(o)) { o.forEach(searchObj); return; }
+                                if (o.contentUrl && typeof o.contentUrl === 'string') {
+                                    const u = new URL(o.contentUrl, location.href).toString(); if (!results.includes(u)) results.push(u);
+                                }
+                                if (o.encoding && typeof o.encoding === 'object') {
+                                    if (o.encoding.contentUrl && typeof o.encoding.contentUrl === 'string') { const u = new URL(o.encoding.contentUrl, location.href).toString(); if (!results.includes(u)) results.push(u); }
+                                }
+                                // Also check for url field which might contain PDF link
+                                if (o.url && typeof o.url === 'string' && /\.pdf([?#]|$)/i.test(o.url)) {
+                                    const u = new URL(o.url, location.href).toString(); if (!results.includes(u)) results.push(u);
+                                }
+                                for (const k of Object.keys(o)) searchObj(o[k]);
+                            };
+                            searchObj(obj);
+                        } catch (e) {}
+                    }
+                } catch (e) {}
+
+                // Also look for embedded PDFs (iframe/embed/object) and elements with PDF-like src
+                try {
+                    Array.from(document.querySelectorAll('iframe[src], embed[src], object[data]')).forEach(el => {
+                        try {
+                            const src = el.getAttribute('src') || el.getAttribute('data') || '';
+                            if (!src) return;
+                            if (/\.pdf([?#]|$)/i.test(src) || /(application|pdf)/i.test(el.type || '')) {
+                                const abs = new URL(src, location.href).toString(); if (!results.includes(abs)) results.push(abs);
+                            }
+                        } catch(e) {}
+                    });
+                } catch (e) {}
+
+                // Return array of unique absolute URLs
+                const absResults = results.map(u => {
+                    try { return new URL(u, location.href).toString(); } catch (e) { return null; }
+                }).filter(Boolean);
+                console.debug('Bello: findAttachments found', absResults.length, 'candidate URLs:', absResults);
+                sendResponse({ success: true, attachments: absResults });
+            } catch (err) {
+                sendResponse({ success: false, error: err && err.message ? err.message : String(err) });
+            }
+            return true;
+        }
+        
+        // Handle getPdfContent - for when we're on a PDF page and need to extract the content
+        if (message.action === 'getPdfContent') {
+            try {
+                // Check if we're on a PDF page
+                const isPdfPage = document.contentType === 'application/pdf' || 
+                                  /\.pdf([?#]|$)/i.test(location.href) ||
+                                  document.querySelector('embed[type="application/pdf"]') !== null;
+                
+                if (isPdfPage) {
+                    // Try to get PDF via fetch from current URL
+                    fetch(location.href, { credentials: 'include' })
+                        .then(response => {
+                            if (response.ok && (response.headers.get('content-type') || '').includes('application/pdf')) {
+                                return response.arrayBuffer();
+                            }
+                            throw new Error('Not a PDF');
+                        })
+                        .then(buffer => {
+                            // Convert to base64
+                            const bytes = new Uint8Array(buffer);
+                            let binary = '';
+                            for (let i = 0; i < bytes.byteLength; i++) {
+                                binary += String.fromCharCode(bytes[i]);
+                            }
+                            const base64 = btoa(binary);
+                            
+                            // Extract filename from URL
+                            let filename = 'attachment.pdf';
+                            try {
+                                const path = new URL(location.href).pathname;
+                                const parts = path.split('/');
+                                const lastPart = parts[parts.length - 1];
+                                if (lastPart && lastPart.toLowerCase().includes('.pdf')) {
+                                    filename = decodeURIComponent(lastPart);
+                                }
+                            } catch(e) {}
+                            
+                            sendResponse({ success: true, data: base64, filename: filename });
+                        })
+                        .catch(err => {
+                            sendResponse({ success: false, error: err.message });
+                        });
+                    return true; // async response
+                } else {
+                    sendResponse({ success: false, error: 'Not a PDF page' });
+                }
+            } catch (err) {
+                sendResponse({ success: false, error: err && err.message ? err.message : String(err) });
+            }
             return true;
         }
     });

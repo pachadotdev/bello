@@ -19,12 +19,14 @@
 		"https://*/*",
 		"tabs", 
 		"storage",
-		"activeTab"
+		"activeTab",
+		"webRequest",
+		"webRequestBlocking"
 	],
 	
 	"background": {
 		"scripts": ["background-minimal.js"],
-		"persistent": false
+		"persistent": true
 	},
 	
 	"content_scripts": [

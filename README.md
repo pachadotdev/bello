@@ -80,6 +80,10 @@ rm -rf build
 npx --yes web-ext run --source-dir connector --verbose
 ```
 
+Go to `about:debugging#/runtime/this-firefox`
+Click "Inspect" on the Bello Connector
+Check the JS console
+
 Both terminals will display informative messages about what is happening. I use `examples.md` to check how changes affect the currently working importer and app-browser integration.
 
 (*) The script will download and use the following DuckDB binaries:

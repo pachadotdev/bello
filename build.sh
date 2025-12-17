@@ -4,8 +4,8 @@ set -euo pipefail
 # build.sh - Download DuckDB (if missing), configure, build and run bello
 # Usage: ./build.sh [--no-run] [--duckdb-url URL] [--clean] [--help] [--install]
 
-rm -rf ~/.local/share/bello
-rm -rf build
+# rm -rf ~/.local/share/bello
+# rm -rf build
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$SCRIPT_DIR"
